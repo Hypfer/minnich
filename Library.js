@@ -6,6 +6,7 @@ const Logger = require("./Logger");
 const IMAGE_EXT = new Set([".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".avif"]);
 
 const SCAN_INTERVAL_MS = 60_000; // the kiosk re-reads the playlist every activation anyway
+const MAX_DEPTH = 8; // nested album folders, not an arbitrary filesystem walk
 
 
 /**
@@ -51,44 +52,9 @@ class Library {
     async _scan() {
         this.lastScan = Date.now();
 
-        const entries = await fs.readdir(this.dir, {withFileTypes: true}).catch(() => {
-            Logger.error(`Cannot read photo dir ${this.dir}`);
-
-            return [];
-        });
-
         const fresh = new Map();
 
-        for (const e of entries) {
-            if (!e.isFile()) {
-                continue;
-            }
-
-            const ext = path.extname(e.name).toLowerCase();
-            if (!IMAGE_EXT.has(ext)) {
-                continue;
-            }
-
-            const file = path.join(this.dir, e.name);
-
-            try {
-                // Only the first 64 KiB is needed for the headers
-                const header = await this._head(file);
-                const sniffed = sniffImage(header, ext);
-                const stats = await fs.stat(file);
-
-                fresh.set(stableId(e.name), {
-                    file: file,
-                    name: e.name,
-                    w: sniffed?.w ?? 0,
-                    h: sniffed?.h ?? 0,
-                    orientation: sniffed?.orientation ?? 1,
-                    mtimeMs: stats.mtimeMs
-                });
-            } catch (err) {
-                Logger.warn(`Skipping unreadable file ${e.name}: ${err?.message ?? err}`);
-            }
-        }
+        await this._walk(this.dir, "", 0, fresh);
 
         const added = fresh.size - this.assets.size;
         this.assets = fresh;
@@ -96,6 +62,63 @@ class Library {
         Logger.debug(`Scanned ${this.dir}: ${this.assets.size} assets`);
         if (added > 0) {
             Logger.info(`Library grew by ${added} asset(s)`);
+        }
+    }
+
+    /**
+     * Depth-first walk of the photo dir. [relDir] is the path relative to
+     * the library root ("" at the root), both for ids — two files named
+     * alike in different folders must not collide — and for skipping the
+     * walk's own descent loops.
+     *
+     * @private
+     * @param {string} dir - absolute directory
+     * @param {string} relDir - relative to the library root
+     * @param {number} depth
+     * @param {Map<string, object>} fresh
+     */
+    async _walk(dir, relDir, depth, fresh) {
+        if (depth > MAX_DEPTH) {
+            return;
+        }
+
+        const entries = await fs.readdir(dir, {withFileTypes: true}).catch(() => {
+            Logger.error(`Cannot read photo dir ${dir}`);
+
+            return [];
+        });
+
+        for (const e of entries) {
+            const rel = relDir ? `${relDir}/${e.name}` : e.name;
+
+            if (e.isDirectory()) {
+                await this._walk(path.join(dir, e.name), rel, depth + 1, fresh);
+            } else if (e.isFile()) {
+                const ext = path.extname(e.name).toLowerCase();
+                if (!IMAGE_EXT.has(ext)) {
+                    continue;
+                }
+
+                const file = path.join(dir, e.name);
+
+                try {
+                    // Only the first 64 KiB is needed for the headers
+                    const header = await this._head(file);
+                    const sniffed = sniffImage(header, ext);
+                    const stats = await fs.stat(file);
+
+                    fresh.set(stableId(rel), {
+                        file: file,
+                        name: rel,
+                        w: sniffed?.w ?? 0,
+                        h: sniffed?.h ?? 0,
+                        orientation: sniffed?.orientation ?? 1,
+                        mtimeMs: stats.mtimeMs
+                    });
+                } catch (err) {
+                    Logger.warn(`Skipping unreadable file ${rel}: ${err?.message ?? err}`);
+                }
+            }
         }
     }
 
@@ -161,17 +184,19 @@ class Library {
 /**
  * A stable id independent of the array order: the kiosk stores nothing but
  * the id between sessions, so the same photo must keep its id forever.
+ * The relative path, not the bare filename, so same-named files in
+ * different folders get different ids.
  *
- * @param {string} name
+ * @param {string} relPath
  * @return {string}
  */
-function stableId(name) {
+function stableId(relPath) {
     let h1 = 0x811c9dc5;
     let h2 = 0x01000193;
 
-    for (let i = 0; i < name.length; i++) {
-        h1 = ((h1 ^ name.charCodeAt(i)) * 0x01000193) >>> 0;
-        h2 = ((h2 + name.charCodeAt(i) * (i + 7)) * 2654435761) >>> 0;
+    for (let i = 0; i < relPath.length; i++) {
+        h1 = ((h1 ^ relPath.charCodeAt(i)) * 0x01000193) >>> 0;
+        h2 = ((h2 + relPath.charCodeAt(i) * (i + 7)) * 2654435761) >>> 0;
     }
 
     return (h1.toString(36) + h2.toString(36)).padStart(12, "0");
