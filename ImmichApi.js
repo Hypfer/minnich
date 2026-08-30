@@ -11,10 +11,12 @@ class ImmichApi {
      * @param {import("./Library")} library
      * @param {object} [options]
      * @param {string} [options.apiKey] - when set, requests must carry it as x-api-key; when empty, any key is accepted
+     * @param {import("./Smartcrop")} [options.smartcrop]
      */
     constructor(library, options = {}) {
         this.library = library;
         this.apiKey = options.apiKey ?? "";
+        this.smartcrop = options.smartcrop ?? null;
     }
 
     /**
@@ -86,6 +88,12 @@ class ImmichApi {
                 const size = Math.min(Number(body.size) || 100, 500);
                 const withExif = body.withExif === true;
 
+                // A key with a panel profile crops, so the playlist reports
+                // the shape that panel will actually be shown: a perfect
+                // match for the kiosk's fill-the-screen decision, and
+                // nothing portrait for its pairing to find.
+                const profile = this.smartcrop?.profile(`${req.headers["x-api-key"] ?? ""}`);
+
                 const all = await this.library.list();
                 const start = (page - 1) * size;
                 const items = all.slice(start, start + size).map(meta => {
@@ -99,11 +107,19 @@ class ImmichApi {
                     // portrait photos; orientation as a string, matching the
                     // exiftool pass-through the client tolerates
                     if (withExif && meta.w && meta.h) {
-                        item.exifInfo = {
-                            exifImageWidth: meta.w,
-                            exifImageHeight: meta.h,
-                            orientation: String(meta.orientation)
-                        };
+                        if (profile) {
+                            item.exifInfo = {
+                                exifImageWidth: profile.width,
+                                exifImageHeight: profile.height,
+                                orientation: "1"
+                            };
+                        } else {
+                            item.exifInfo = {
+                                exifImageWidth: meta.w,
+                                exifImageHeight: meta.h,
+                                orientation: String(meta.orientation)
+                            };
+                        }
                     }
 
                     return item;
@@ -138,7 +154,10 @@ class ImmichApi {
                 });
             }
 
-            // The pixels. Any decodable image; size=preview is the only form asked
+            // The pixels. Any decodable image; size=preview is the only form asked.
+            // A key with a panel profile gets the photo re-framed for that
+            // panel instead: cropped around the salient region to the
+            // panel's own shape, downscaled to its resolution.
             const thumbMatch = url.pathname.match(/^\/api\/assets\/([^/]+)\/thumbnail$/);
             if (thumbMatch && req.method === "GET") {
                 const bytes = await this.library.readAsset(thumbMatch[1]);
@@ -146,8 +165,11 @@ class ImmichApi {
                     return this.send(res, 404, {message: "asset not found"});
                 }
 
+                const profile = this.smartcrop?.profile(`${req.headers["x-api-key"] ?? ""}`);
+                const out = profile ? await this.smartcrop.crop(bytes, profile) : null;
+
                 res.writeHead(200, {"Content-Type": "application/octet-stream"});
-                res.end(bytes);
+                res.end(out ?? bytes);
 
                 return;
             }

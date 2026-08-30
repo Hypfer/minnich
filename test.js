@@ -1,11 +1,16 @@
 const Logger = require("./Logger");
 const Library = require("./Library");
 const ImmichApi = require("./ImmichApi");
+const Smartcrop = require("./Smartcrop");
+const sharp = require("sharp");
 
 const testDir = process.argv[2] ?? "./photos";
 
 const library = new Library(testDir);
-const api = new ImmichApi(library);
+const sc = new Smartcrop({testpanel: {width: 640, height: 320}});
+const api = new ImmichApi(library, {
+    smartcrop: sc
+});
 
 function assert(cond, msg) {
     if (cond) {
@@ -16,10 +21,10 @@ function assert(cond, msg) {
     }
 }
 
-async function call(method, path, body) {
+async function call(method, path, body, key = "test") {
     const options = {
         method: method,
-        headers: {"x-api-key": "test"}
+        headers: {"x-api-key": key}
     };
     if (body) {
         options.headers["Content-Type"] = "application/json";
@@ -101,6 +106,34 @@ async function call(method, path, body) {
         // Unknown route
         r = await call("GET", "/api/server/info");
         assert(r.status === 404, "unknown route: 404");
+
+        // Smartcrop: a key with a profile gets panel-shaped, panel-sized bytes
+        r = await call("GET", `/api/assets/${first.id}/thumbnail?size=preview`, null, "testpanel");
+        const cropped = await r.bytes();
+        const meta = await sharp(cropped).metadata();
+        assert(r.status === 200 && meta.width === 640 && meta.height === 320,
+            `smartcrop thumbnail: ${meta.width}x${meta.height}, ${cropped.length} bytes`);
+        assert(cropped.length < 227357, `smartcrop thumbnail smaller than original (${cropped.length}B)`);
+
+        // Smartcrop search: the profile reports the cropped shape
+        r = await call("POST", "/api/search/metadata", {page: 1, size: 5, withExif: true}, "testpanel");
+        search = await r.json();
+        const cinfo = search.assets.items[0].exifInfo;
+        assert(cinfo.exifImageWidth === 640 && cinfo.exifImageHeight === 320 && cinfo.orientation === "1",
+            `smartcrop search: exifInfo reports panel shape ${cinfo.exifImageWidth}x${cinfo.exifImageHeight}`);
+
+        // Smartcrop: an unknown key still gets the original
+        r = await call("GET", `/api/assets/${first.id}/thumbnail?size=preview`, null, "unknownkey");
+        const orig = await r.bytes();
+        const ometa = await sharp(orig).metadata();
+        assert(ometa.width === 2000, `unknown key: original served (${ometa.width}x${ometa.height})`);
+
+        // Smartcrop: the :portrait key variant swaps the axes
+        r = await call("GET", `/api/assets/${first.id}/thumbnail?size=preview`, null, "testpanel:portrait");
+        const pmeta = await sharp(await r.bytes()).metadata();
+        assert(r.status === 200 && pmeta.width === 320 && pmeta.height === 640,
+            `portrait key variant: ${pmeta.width}x${pmeta.height}`);
+        assert(sc.profile("testpanel:landscape").width === 640, "landscape key variant: axes normalized");
     } finally {
         process.exit(process.exitCode ?? 0);
     }
