@@ -128,7 +128,11 @@ class Admin {
             }
 
             if (url.pathname === "/admin/api/annotate" && req.method === "POST") {
-                return this.json(res, 200, this.startAnnotate(url.searchParams.get("force") === "1"));
+                const force = url.searchParams.get("force") === "1";
+                const photo = url.searchParams.get("photo");
+                const decoded = photo ? decodeURIComponent(photo) : null;
+
+                return this.json(res, 200, this.startAnnotate(force, decoded));
             }
 
             if (url.pathname === "/admin/api/scan" && req.method === "POST") {
@@ -321,13 +325,15 @@ class Admin {
      * Spawn annotate.js against the same photo dir the server serves.
      * Its log lines land in the state endpoint; caches are invalidated
      * when it exits so fresh sidecars take effect immediately. force=1
-     * re-annotates everything (FORCE env in the child).
+     * re-annotates everything; photo targets exactly one (always forced —
+     * a redo of a current sidecar is the point).
      *
      * @private
      * @param {boolean} force
+     * @param {string|null} photo - relative path of one photo, or null
      * @return {{started: boolean}}
      */
-    startAnnotate(force = false) {
+    startAnnotate(force = false, photo = null) {
         if (this.annotate.running) {
             return {started: false};
         }
@@ -345,8 +351,12 @@ class Admin {
         // child gets PHOTO_DIR explicitly: the parent env may disagree
         // (tests) or be unset. It scans the dir itself, so photos added
         // since this server's last scan are annotated too.
-        const child = spawn(process.execPath, [path.join(__dirname, "annotate.js")], {
-            env: {...process.env, PHOTO_DIR: this.library.dir, FORCE: force ? "1" : ""}
+        const args = [path.join(__dirname, "annotate.js")];
+        if (photo) {
+            args.push(photo);
+        }
+        const child = spawn(process.execPath, args, {
+            env: {...process.env, PHOTO_DIR: this.library.dir, FORCE: photo || force ? "1" : ""}
         });
 
         const feed = stream => stream.on("data", buf => {
@@ -456,7 +466,10 @@ const PAGE = `<!doctype html>
 <dialog id="dlg">
   <div style="display:flex;justify-content:space-between;align-items:baseline;gap:10px">
     <strong id="d-name"></strong>
-    <button onclick="dlg.close()">close</button>
+    <span><button id="d-prev" title="previous (arrow left)">‹</button>
+    <button id="d-next" title="next (arrow right)">›</button>
+    <button id="d-redo" title="re-annotate exactly this photo (overwrites its sidecar)">redo annotation</button>
+    <button onclick="dlg.close()">close</button></span>
   </div>
   <div class="pair" style="margin-top:10px">
     <figure><img id="d-orig"><figcaption>original + boxes (<span style="color:#f85149">never cut</span>,
@@ -468,7 +481,7 @@ const PAGE = `<!doctype html>
 </dialog>
 
 <script>
-var panel = "", timer = null;
+var panel = "", timer = null, currentDetail = null, gridIds = [];
 
 function badge(v) {
   var cls = v || "NONE";
@@ -485,6 +498,7 @@ async function loadPhotos() {
   grid.textContent = "loading…";
   var photos = await (await fetch("/admin/api/photos?panel=" + encodeURIComponent(panel))).json();
   grid.textContent = "";
+  gridIds = photos.map(function (p) { return p.id; });
   for (var i = 0; i < photos.length; i++) {
     var p = photos[i];
     var card = document.createElement("div");
@@ -502,6 +516,7 @@ async function loadPhotos() {
 }
 
 async function openDetail(id) {
+  currentDetail = id;
   var d = await (await fetch("/admin/api/photo/" + encodeURIComponent(id) + "?panel=" + encodeURIComponent(panel))).json();
   document.getElementById("d-name").textContent = d.name;
   document.getElementById("d-orig").src = "/admin/api/photo/" + encodeURIComponent(id) +
@@ -563,6 +578,7 @@ async function refreshState() {
       log.className = "show";
       log.textContent = s.annotate.lines.join("\\n") || "(no output)";
       loadPhotos(); // fresh sidecars, fresh verdicts
+      if (currentDetail && dlg.open) { openDetail(currentDetail); } // redo landed
     }
   }
   if (s.library) {
@@ -581,6 +597,30 @@ document.getElementById("scan").onclick = async function () {
   await fetch("/admin/api/scan", {method: "POST"});
   refreshState();
   setTimeout(loadPhotos, 1500);
+};
+function stepDetail(delta) {
+  if (!currentDetail || !gridIds.length) { return; }
+  var i = gridIds.indexOf(currentDetail);
+  if (i === -1) { openDetail(currentDetail); return; }
+  openDetail(gridIds[(i + delta + gridIds.length) % gridIds.length]);
+}
+
+document.addEventListener("keydown", function (ev) {
+  if (!dlg.open) { return; }
+  if (ev.key === "ArrowLeft") { ev.preventDefault(); stepDetail(-1); }
+  if (ev.key === "ArrowRight") { ev.preventDefault(); stepDetail(1); }
+});
+
+document.getElementById("d-prev").onclick = function () { stepDetail(-1); };
+document.getElementById("d-next").onclick = function () { stepDetail(1); };
+document.getElementById("d-redo").onclick = async function () {
+  if (!currentDetail) { return; }
+  this.disabled = true;
+  // the photo's relative path (what annotate.js matches against)
+  var d = await (await fetch("/admin/api/photo/" + encodeURIComponent(currentDetail))).json();
+  await fetch("/admin/api/annotate?force=1&photo=" + encodeURIComponent(d.name), {method: "POST"});
+  refreshState();
+  this.disabled = false;
 };
 refreshState();
 </script>

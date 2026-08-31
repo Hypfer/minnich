@@ -9,6 +9,10 @@
  * mismatch — the same check the server applies). Single sample, temperature
  * 0: validated across a 39-photo corpus in croplab, where sampling added
  * cost, not confidence.
+ *
+ *   node src/annotate.js                  # everything pending
+ *   FORCE=1 node src/annotate.js          # everything, overwriting
+ *   FORCE=1 node src/annotate.js dir/x.jpg  # exactly that one (admin redo)
  */
 
 const fs = require("fs/promises");
@@ -28,6 +32,10 @@ const PHOTO_DIR = process.env.PHOTO_DIR ?? "/photos";
 // default skips photos whose sidecar is current (the same classifier-aware
 // check the server applies).
 const FORCE = process.env.FORCE === "1";
+// Optional positional arg: the exact relative path of one photo. Targeted
+// runs pair naturally with FORCE=1 (the admin redo button does exactly
+// that). argv[0]=node, argv[1]=script.
+const ONLY = process.argv[2] ?? null;
 const MAX_TOKENS = 6000;
 
 // Croplab's converged prompt (prompt-crop-v4.md), plus an explicit interest
@@ -96,11 +104,14 @@ function parseThings(text) {
 
 /**
  * One annotation attempt. Returns things or null; the caller retries once.
+ * Parse failures are logged with the reason, not swallowed — a looping
+ * model (finish_reason "length", no JSON in sight) shows up here.
  *
  * @param {Buffer} photo
+ * @param {string} name - for log lines
  * @return {Promise<Array<object>|null>}
  */
-async function ask(photo) {
+async function ask(photo, name) {
     const res = await fetch(`${LLM_URL}/v1/chat/completions`, {
         method: "POST",
         headers: {"Content-Type": "application/json"},
@@ -118,12 +129,23 @@ async function ask(photo) {
         })
     });
     if (!res.ok) {
-        throw new Error(`LLM HTTP ${res.status}`);
+        throw new Error(`LLM HTTP ${res.status}: ${(await res.text().catch(() => "")).slice(0, 200)}`);
     }
 
     const body = await res.json();
+    const choice = body.choices?.[0] ?? {};
+    const content = choice.message?.content ?? "";
+    const finish = choice.finish_reason ?? "?";
 
-    return parseThings(body.choices?.[0]?.message?.content ?? "");
+    const things = parseThings(content);
+    if (!things) {
+        const detail = !content || !content.trim()
+            ? "empty answer"
+            : `${content.trim().slice(0, 120).replace(/\s+/g, " ")}…`;
+        Logger.warn(`${name}: no JSON parsed (finish_reason=${finish}, ${content.length} chars) — ${detail}`);
+    }
+
+    return things;
 }
 
 
@@ -159,6 +181,9 @@ async function main() {
     const seen = new Set();
     const pending = [];
     for (const meta of assets) {
+        if (ONLY && meta.name !== ONLY) {
+            continue;
+        }
         const hash = await sidecars.hash(meta);
         if (seen.has(hash)) {
             continue; // identical file, one annotation
@@ -170,7 +195,7 @@ async function main() {
         pending.push({meta: meta, hash: hash});
     }
 
-    Logger.info(`Annotating ${pending.length} of ${assets.length} photos (${MODEL || "unset"} @ ${LLM_URL}, x${CONCURRENCY}${FORCE ? ", forced" : ""})`);
+    Logger.info(`Annotating ${pending.length} of ${assets.length} photos${ONLY ? ` (${ONLY})` : ""} (${MODEL || "unset"} @ ${LLM_URL}, x${CONCURRENCY}${FORCE ? ", forced" : ""})`);
 
     let done = 0, failed = 0, index = 0;
 
@@ -185,7 +210,7 @@ async function main() {
 
             let things = null;
             for (let attempt = 0; attempt < 2 && !things; attempt++) {
-                things = await ask(photo).catch(err => {
+                things = await ask(photo, job.meta.name).catch(err => {
                     Logger.warn(`annotate attempt ${attempt + 1} failed for ${job.meta.name}: ${err?.message ?? err}`);
                     return null;
                 });
