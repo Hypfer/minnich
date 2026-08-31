@@ -5,14 +5,18 @@ const Logger = require("./Logger");
 
 const IMAGE_EXT = new Set([".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".avif"]);
 
-const SCAN_INTERVAL_MS = 60_000; // the kiosk re-reads the playlist every activation anyway
 const MAX_DEPTH = 8; // nested album folders, not an arbitrary filesystem walk
 
 
 /**
- * The photo folder as a library: a scan that maps filenames to stable ids
- * and sniffs each image's dimensions and EXIF orientation from its header,
- * without decoding it.
+ * The photo folder as a library: an explicit scan maps filenames to stable
+ * ids and sniffs each image's dimensions and EXIF orientation from its
+ * header, without decoding it.
+ *
+ * Scanning is deliberate, never incidental: startup, the nightly timer,
+ * and the admin button. Requests between scans see the library as of the
+ * last scan. The one exception is the very first access (ensureScanned),
+ * so a Library constructed outside app.js still answers.
  */
 class Library {
     /**
@@ -24,17 +28,24 @@ class Library {
         /** @type {Map<string, {file: string, name: string, w: number, h: number, orientation: number, mtimeMs: number}>} */
         this.assets = new Map(); // id -> meta
 
-        this.lastScan = 0;
+        this.scanned = false;
         this.scanning = null;
+        this.lastScan = 0;
     }
 
     /**
+     * Walk the photo dir now. Concurrent callers share one walk.
+     *
+     * The walk builds a fresh map off to the side; this.assets is swapped
+     * in one synchronous assignment only after the walk finished. Requests
+     * racing a scan therefore always see the previous complete snapshot —
+     * never a partially built library. Do not "optimize" this into
+     * clearing assets up front.
+     *
      * @public
+     * @return {Promise<void>}
      */
-    async rescan() {
-        if (Date.now() - this.lastScan < SCAN_INTERVAL_MS) {
-            return;
-        }
+    scan() {
         if (this.scanning) {
             return this.scanning;
         }
@@ -47,21 +58,30 @@ class Library {
     }
 
     /**
+     * Scan once, only if this library has never been scanned.
+     *
+     * @private
+     */
+    ensureScanned() {
+        return this.scanned ? Promise.resolve() : this.scan();
+    }
+
+    /**
      * @private
      */
     async _scan() {
-        this.lastScan = Date.now();
-
         const fresh = new Map();
 
         await this._walk(this.dir, "", 0, fresh);
 
         const added = fresh.size - this.assets.size;
         this.assets = fresh;
+        this.scanned = true;
+        this.lastScan = Date.now();
 
         Logger.debug(`Scanned ${this.dir}: ${this.assets.size} assets`);
         if (added > 0) {
-            Logger.info(`Library grew by ${added} asset(s)`);
+            Logger.info(`Library: ${added} new asset(s), ${this.assets.size} total`);
         }
     }
 
@@ -88,11 +108,15 @@ class Library {
             return [];
         });
 
-        for (const e of entries) {
-            const rel = relDir ? `${relDir}/${e.name}` : e.name;
+          for (const e of entries) {
+              const rel = relDir ? `${relDir}/${e.name}` : e.name;
 
-            if (e.isDirectory()) {
-                await this._walk(path.join(dir, e.name), rel, depth + 1, fresh);
+              if (e.isDirectory()) {
+                  // The sidecar directory (annotate.js output) is not an album
+                  if (e.name.startsWith(".")) {
+                      continue;
+                  }
+                  await this._walk(path.join(dir, e.name), rel, depth + 1, fresh);
             } else if (e.isFile()) {
                 const ext = path.extname(e.name).toLowerCase();
                 if (!IMAGE_EXT.has(ext)) {
@@ -148,7 +172,7 @@ class Library {
      * @return {Array<{id: string, file: string, name: string, w: number, h: number, orientation: number, mtimeMs: number}>}
      */
     async list() {
-        await this.rescan();
+        await this.ensureScanned();
 
         return [...this.assets.entries()]
             .map(([id, meta]) => ({id: id, ...meta}))
@@ -160,7 +184,7 @@ class Library {
      * @param {string} id
      */
     async get(id) {
-        await this.rescan();
+        await this.ensureScanned();
 
         return this.assets.get(id) ?? null;
     }

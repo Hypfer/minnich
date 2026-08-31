@@ -7,11 +7,7 @@ ENV PHOTO_DIR="/photos"
 COPY package.json /app
 RUN npm install --omit=dev
 
-COPY app.js /app
-COPY Logger.js /app
-COPY Library.js /app
-COPY ImmichApi.js /app
-COPY Smartcrop.js /app
+COPY src /app/src
 
 EXPOSE 3000
 

@@ -1,10 +1,11 @@
 {
   "name": "minnich",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "The minimum Immich: serves a photo folder through the six API endpoints kiosk-satellite's Immich screensaver calls",
-  "main": "app.js",
+  "main": "src/app.js",
   "scripts": {
-    "start": "node app.js"
+    "start": "node src/app.js",
+    "test": "node test.js"
   },
   "license": "Apache-2.0",
   "dependencies": {
