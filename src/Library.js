@@ -7,6 +7,9 @@ const IMAGE_EXT = new Set([".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".a
 
 const MAX_DEPTH = 8; // nested album folders, not an arbitrary filesystem walk
 
+const HEAD_CHUNK = 65536; // header read granularity; most files need one
+const HEAD_MAX = 1 << 20; // a JPEG's SOF lives within 1 MiB, pathological or not
+
 
 /**
  * The photo folder as a library: an explicit scan maps filenames to stable
@@ -126,9 +129,19 @@ class Library {
                 const file = path.join(dir, e.name);
 
                 try {
-                    // Only the first 64 KiB is needed for the headers
-                    const header = await this._head(file);
-                    const sniffed = sniffImage(header, ext);
+                    // 64 KiB covers the headers of any sane file. A few
+                    // camera files bury SOF under ~200 KB of APP segments
+                    // (embedded thumbnail + XMP + ICC); sniffing then
+                    // walks off the end of the head, which sniffImage
+                    // reports by returning null — re-read double, up to
+                    // HEAD_MAX, and sniff again.
+                    let header = await this._head(file);
+                    let sniffed = sniffImage(header, ext);
+                    for (let bytes = HEAD_CHUNK; !sniffed && bytes < HEAD_MAX && header.length >= bytes; bytes *= 2) {
+                        header = await this._head(file, bytes * 2);
+                        sniffed = sniffImage(header, ext);
+                    }
+
                     const stats = await fs.stat(file);
 
                     fresh.set(stableId(rel), {
@@ -151,7 +164,7 @@ class Library {
      * @param {string} file
      * @return {Promise<Buffer>}
      */
-    async _head(file, n = 65536) {
+    async _head(file, n = HEAD_CHUNK) {
         const handle = await fs.open(file, fsConstants.O_RDONLY);
 
         try {
@@ -379,7 +392,10 @@ function sniffWebpSize(buf) {
         return null;
     }
 
-    if (buf.toString("latin1", 8, 12) === "VP8X") {
+    // VP8X (extended) files: the fourcc sits at 12-15, canvas w-1/h-1 as
+    // 24-bit LE at 24-29. Plain VP8/VP8L files carry their size inside the
+    // bitstream chunk and are not header-sniffable — rare among photos.
+    if (buf.toString("latin1", 12, 16) === "VP8X") {
         const w = 1 + (buf[24] | (buf[25] << 8) | (buf[26] << 16));
         const h = 1 + (buf[27] | (buf[28] << 8) | (buf[29] << 16));
 

@@ -54,6 +54,36 @@ class Admin {
     canHandle(pathname) {
         return pathname === "/admin" || pathname.startsWith("/admin/");
     }
+
+    /**
+     * Panel options for the dropdown: each built-in profile plus its
+     * ":portrait"/":landscape" variants, labeled with the dimensions the
+     * variant actually resolves to. Variants identical to the base profile
+     * (same numbers, e.g. landscape on an already-landscape panel) are
+     * skipped — no redundant options.
+     *
+     * @private
+     * @return {Array<{key: string, label: string}>}
+     */
+    panelOptions() {
+        const keys = [...this.api.smartcrop.profiles.keys()].sort();
+        const options = [];
+
+        for (const name of keys) {
+            const base = this.api.smartcrop.profile(name);
+            options.push({key: name, label: `${name} (${base.width}×${base.height})`});
+
+            for (const suffix of ["portrait", "landscape"]) {
+                const key = `${name}:${suffix}`;
+                const p = this.api.smartcrop.profile(key);
+                if (p.width !== base.width || p.height !== base.height) {
+                    options.push({key: key, label: `${key} (${p.width}×${p.height})`});
+                }
+            }
+        }
+
+        return options;
+    }
     /**
      * @public
      * @param {import("http").IncomingMessage} req
@@ -68,7 +98,7 @@ class Admin {
 
             if (url.pathname === "/admin/api/state" && req.method === "GET") {
                 return this.json(res, 200, {
-                    panels: [...this.api.smartcrop.profiles.keys()].sort(),
+                    panels: this.panelOptions(),
                     annotate: {...this.annotate, lines: this.annotate.lines.slice(-40)},
                     library: {
                         assets: this.library.assets.size,
@@ -506,10 +536,11 @@ async function refreshState() {
   if (sel.options.length === 0) {
     for (var i = 0; i < s.panels.length; i++) {
       var o = document.createElement("option");
-      o.value = o.textContent = s.panels[i];
+      o.value = s.panels[i].key;
+      o.textContent = s.panels[i].label;
       sel.appendChild(o);
     }
-    if (s.panels.length) { panel = s.panels[0]; sel.value = panel; loadPhotos(); }
+    if (s.panels.length) { panel = s.panels[0].key; sel.value = panel; loadPhotos(); }
     sel.onchange = function () { panel = sel.value; loadPhotos(); };
   }
   var st = document.getElementById("status");

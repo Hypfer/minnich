@@ -269,8 +269,16 @@ const os = require("os");
 
         r = await call("GET", "/admin/api/state");
         const state = await r.json();
-        assert(state.panels.includes("testpanel"), "admin state: panel list from backend profiles");
+        assert(state.panels.some(p => p.key === "testpanel"),
+            "admin state: panel list from backend profiles");
         assert(state.annotate.running === false, "admin state: annotate idle at start");
+
+        // variants exposed with resolved dims; ones identical to the base skipped
+        const keys = state.panels.map(p => p.key);
+        assert(keys.includes("testpanel:portrait") && !keys.includes("testpanel:landscape"),
+            "admin state: portrait variant listed, redundant landscape variant skipped");
+        const tp = state.panels.find(p => p.key === "testpanel:portrait");
+        assert(tp.label.includes("320×640"), `admin state: variant label shows its dims (${tp.label})`);
 
         r = await call("GET", "/admin/api/photos?panel=testpanel");
         const photos = await r.json();
