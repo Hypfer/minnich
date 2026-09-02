@@ -8,7 +8,7 @@ const IMAGE_EXT = new Set([".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".a
 const MAX_DEPTH = 8; // nested album folders, not an arbitrary filesystem walk
 
 const HEAD_CHUNK = 65536; // header read granularity; most files need one
-const HEAD_MAX = 1 << 20; // a JPEG's SOF lives within 1 MiB, pathological or not
+const HEAD_MAX = 4 << 20; // some phone cameras bury SOF under >1 MiB of APP segments
 
 
 /**
