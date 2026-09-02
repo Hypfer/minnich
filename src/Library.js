@@ -130,14 +130,16 @@ class Library {
 
                 try {
                     // 64 KiB covers the headers of any sane file. A few
-                    // camera files bury SOF under ~200 KB of APP segments
-                    // (embedded thumbnail + XMP + ICC); sniffing then
-                    // walks off the end of the head, which sniffImage
-                    // reports by returning null — re-read double, up to
-                    // HEAD_MAX, and sniff again.
+                    // camera files bury SOF under hundreds of KiB (up to
+                    // megabytes) of APP segments — embedded thumbnails,
+                    // XMP, ICC. Sniffing then walks off the end of the
+                    // head, which shows as a missing size: sniffImage
+                    // returns null, or {w:0,h:0,orientation} when it did
+                    // find orientation. Either way the size is unknown —
+                    // re-read double, up to HEAD_MAX, and sniff again.
                     let header = await this._head(file);
                     let sniffed = sniffImage(header, ext);
-                    for (let bytes = HEAD_CHUNK; !sniffed && bytes < HEAD_MAX && header.length >= bytes; bytes *= 2) {
+                    for (let bytes = HEAD_CHUNK; !(sniffed?.w > 0) && bytes < HEAD_MAX && header.length >= bytes; bytes *= 2) {
                         header = await this._head(file, bytes * 2);
                         sniffed = sniffImage(header, ext);
                     }
